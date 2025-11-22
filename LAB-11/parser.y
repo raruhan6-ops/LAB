@@ -3,200 +3,239 @@
 #include <stdlib.h>
 #include <string.h>
 
-void yyerror(const char* s);
-int yylex(void);
+/* ---------- Symbol table ---------- */
 
-// ---------- symbol table ----------
 typedef struct {
-    char* name;
-    char* type;
+    char name[32];
+    char type[16];
 } Symbol;
 
-Symbol symtab[256];
+Symbol symtab[100];
 int symcount = 0;
 
-// ---------- quadruples ----------
-typedef struct {
-    char op[8];
-    char arg1[32];
-    char arg2[32];
-    char res[32];
-} Quad;
+char curType[16];        /* current declaration type: "int" or "float" */
 
-Quad quads[1024];
-int quadcount = 0;
-
-char* current_type = NULL;
-
-char* newTemp() {
-    static int tempNo = 0;
-    char buf[32];
-    sprintf(buf, "t%d", tempNo++);
-    return strdup(buf);
-}
-
-void addSymbol(const char* name, const char* type) {
-    for (int i = 0; i < symcount; ++i) {
-        if (strcmp(symtab[i].name, name) == 0) return;
-    }
-    symtab[symcount].name = strdup(name);
-    symtab[symcount].type = strdup(type);
-    symcount++;
-}
-
-int findSymbol(const char* name) {
-    for (int i = 0; i < symcount; ++i) {
-        if (strcmp(symtab[i].name, name) == 0) return i;
+int lookup(char *name) {
+    for (int i = 0; i < symcount; i++) {
+        if (strcmp(symtab[i].name, name) == 0)
+            return i;
     }
     return -1;
 }
-%}
 
-%union {
-    char* str;  // identifier / number / temp name
+void addSymbol(char *name, char *type) {
+    if (lookup(name) != -1) return;  /* already exists */
+    strcpy(symtab[symcount].name, name);
+    strcpy(symtab[symcount].type, type);
+    symcount++;
 }
 
-/* tokens */
+void printSymtab(void) {
+    printf("Index\tName\tType\n");
+    for (int i = 0; i < symcount; i++) {
+        printf("%d\t%s\t%s\n", i, symtab[i].name, symtab[i].type);
+    }
+}
+
+/* ---------- Quadruples ---------- */
+
+typedef struct {
+    char op[10];
+    char arg1[32];
+    char arg2[32];
+    char result[32];
+} Quad;
+
+Quad quads[200];
+int qc = 0;   /* count of quads */
+
+int nextInstr(void) { return qc; }
+
+void emit(const char *op, const char *a1, const char *a2, const char *res) {
+    strcpy(quads[qc].op,    op  ? op  : "");
+    strcpy(quads[qc].arg1,  a1  ? a1  : "");
+    strcpy(quads[qc].arg2,  a2  ? a2  : "");
+    strcpy(quads[qc].result,res ? res : "");
+    qc++;
+}
+
+int tempCount = 0;
+char *newTemp(void) {
+    char buf[32];
+    sprintf(buf, "t%d", tempCount++);
+    char *p = (char*)malloc(strlen(buf) + 1);
+    strcpy(p, buf);
+    return p;
+}
+
+/* we’ll keep the last expression’s result here, for while conditions */
+char *lastExprTemp = NULL;
+
+/* ---------- declarations for bison ---------- */
+
+int yylex(void);
+void yyerror(const char *s);
+%}
+
+/* ---------- Bison definitions ---------- */
+
+%union {
+    char *str;   /* for IDs, NUMs, temporaries */
+    int   num;   /* for instruction indices (M, N) */
+}
+
 %token INT FLOAT IF THEN ELSE WHILE DO
 %token <str> ID NUM
-%token <str> ROP          /* relational operator: <, >, ==, etc. */
-%token LBRACE RBRACE
-%token SEMI COMMA ASSIGN
-%token LPAREN RPAREN
-%token PLUS TIMES
+%token <str> ROP
+%token LBRACE RBRACE SEMI COMMA ASSIGN LPAREN RPAREN PLUS TIMES
 
-/* precedence */
-%nonassoc LOWER_THAN_ELSE
-%nonassoc ELSE
-%left PLUS
-%left TIMES
-
-/* typed nonterminals */
-%type <str> Type E IdList
-
-%start Program
+%type <str> E
+%type <num> M N
 
 %%
 
 Program
-    : DeclList StmtList
+    : Decls StmtList
+      {
+          printf("\n=== Symbol Table ===\n");
+          printSymtab();
+
+          printf("\n=== Quadruples ===\n");
+          for (int i = 0; i < qc; i++) {
+              printf("%2d: (%s, %s, %s, %s)\n",
+                     i,
+                     quads[i].op,
+                     quads[i].arg1,
+                     quads[i].arg2,
+                     quads[i].result);
+          }
+      }
     ;
 
-DeclList
+/* Declarations: int s,i;  float x,y,z; */
+
+Decls
     : /* empty */
-    | DeclList D
+    | Decls Decl
     ;
 
-D
+Decl
     : Type IdList SEMI
     ;
 
 Type
-    : INT   { current_type = "int"; }
-    | FLOAT { current_type = "float"; }
+    : INT   { strcpy(curType, "int"); }
+    | FLOAT { strcpy(curType, "float"); }
     ;
 
 IdList
-    : ID              { addSymbol($1, current_type); }
-    | IdList COMMA ID { addSymbol($3, current_type); }
+    : ID                { addSymbol($1, curType); }
+    | IdList COMMA ID   { addSymbol($3, curType); }
     ;
+
+/* Statement list */
 
 StmtList
-    : StmtList S
-    | S
+    : Stmt
+    | StmtList Stmt
     ;
 
-S
-    : A
-    | IF E THEN S %prec LOWER_THAN_ELSE
-    | IF E THEN S ELSE S
-    | WHILE E DO S
-    | LBRACE StmtList RBRACE
-    ;
-
-A
-    : ID ASSIGN E SEMI
+Stmt
+    : ID ASSIGN E SEMI               /* assignment */
       {
-        if (findSymbol($1) < 0) {
-            addSymbol($1, "int");
-        }
-        strcpy(quads[quadcount].op, "=");
-        strcpy(quads[quadcount].arg1, $3);
-        quads[quadcount].arg2[0] = '\0';
-        strcpy(quads[quadcount].res, $1);
-        quadcount++;
+          emit("=", $3, "-", $1);
+      }
+    | WHILE M LPAREN E RPAREN N Stmt /* while(E) S */
+      {
+          /* $2 = start of condition (from M) */
+          /* $6 = index of IF_FALSE quad (from N) */
+
+          char buf[32];
+
+          /* add GOTO back to beginning of condition */
+          sprintf(buf, "%d", $2);
+          emit("GOTO", "", "", buf);
+
+          /* patch IF_FALSE target to instruction after the loop */
+          sprintf(buf, "%d", nextInstr());
+          strcpy(quads[$6].result, buf);
+      }
+    | LBRACE StmtList RBRACE         /* block { ... } */
+      {
+          /* nothing extra needed */
       }
     ;
 
-/* Expressions: arithmetic + simple relational id ROP NUM */
+/* Marker before condition: remember the index of the next instruction */
+M
+    : /* empty */
+      {
+          $$ = nextInstr();
+      }
+    ;
+
+/* After condition: emit IF_FALSE temp, -, ? and remember its position */
+N
+    : /* empty */
+      {
+          emit("IF_FALSE", lastExprTemp, "", "");
+          $$ = nextInstr() - 1;   /* index of that IF_FALSE */
+      }
+    ;
+
+/* Expressions: arithmetic + relational id rop num */
+
 E
     : E PLUS E
       {
-        char* t = newTemp();
-        strcpy(quads[quadcount].op, "+");
-        strcpy(quads[quadcount].arg1, $1);
-        strcpy(quads[quadcount].arg2, $3);
-        strcpy(quads[quadcount].res, t);
-        quadcount++;
-        $$ = t;
+          char *t = newTemp();
+          emit("+", $1, $3, t);
+          $$ = t;
+          lastExprTemp = t;
       }
     | E TIMES E
       {
-        char* t = newTemp();
-        strcpy(quads[quadcount].op, "*");
-        strcpy(quads[quadcount].arg1, $1);
-        strcpy(quads[quadcount].arg2, $3);
-        strcpy(quads[quadcount].res, t);
-        quadcount++;
-        $$ = t;
+          char *t = newTemp();
+          emit("*", $1, $3, t);
+          $$ = t;
+          lastExprTemp = t;
       }
     | LPAREN E RPAREN
-      { $$ = $2; }
+      {
+          $$ = $2;
+          lastExprTemp = $2;
+      }
     | ID
       {
-        if (findSymbol($1) < 0) {
-            addSymbol($1, "int");
-        }
-        $$ = $1;
+          $$ = $1;
+          lastExprTemp = $1;
       }
     | NUM
-      { $$ = $1; }
-    | ID ROP NUM
       {
-        char* t = newTemp();
-        strcpy(quads[quadcount].op, $2);  /* "<", ">" etc */
-        strcpy(quads[quadcount].arg1, $1);
-        strcpy(quads[quadcount].arg2, $3);
-        strcpy(quads[quadcount].res, t);
-        quadcount++;
-        $$ = t;
+          $$ = $1;
+          lastExprTemp = $1;
+      }
+    | ID ROP NUM       /* relational: id < num, id == num, etc. */
+      {
+          char *t = newTemp();
+          emit($2, $1, $3, t);
+          $$ = t;
+          lastExprTemp = t;
       }
     ;
 
 %%
 
-void yyerror(const char* s) {
-    fprintf(stderr, "Parse error: %s\n", s);
-}
-
 int main(void) {
+    printf("Parsing...\n");
     if (yyparse() == 0) {
-        printf("Parse success.\n");
-
-        printf("\nSymbol table:\n");
-        for (int i = 0; i < symcount; ++i) {
-            printf("%d: %s\t%s\n", i, symtab[i].name, symtab[i].type);
-        }
-
-        printf("\nQuadruples:\n");
-        for (int i = 0; i < quadcount; ++i) {
-            printf("%d: (%s, %s, %s, %s)\n",
-                   i,
-                   quads[i].op,
-                   quads[i].arg1,
-                   quads[i].arg2,
-                   quads[i].res);
-        }
+        printf("\nParse success.\n");
+    } else {
+        printf("\nParse failed.\n");
     }
     return 0;
+}
+
+void yyerror(const char *s) {
+    fprintf(stderr, "Error: %s\n", s);
 }

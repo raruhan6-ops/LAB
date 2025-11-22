@@ -64,8 +64,7 @@ extern int yydebug;
      LPAREN = 273,
      RPAREN = 274,
      PLUS = 275,
-     TIMES = 276,
-     LOWER_THAN_ELSE = 277
+     TIMES = 276
    };
 #endif
 
@@ -74,9 +73,10 @@ extern int yydebug;
 typedef union YYSTYPE
 {
 /* Line 2058 of yacc.c  */
-#line 55 "parser.y"
+#line 82 "parser.y"
 
-    char* str;  // identifier / number / temp name
+    char *str;   /* for IDs, NUMs, temporaries */
+    int   num;   /* for instruction indices (M, N) */
 
 
 /* Line 2058 of yacc.c  */
